@@ -756,6 +756,75 @@ func TestJetStreamClusterFullConsumerState(t *testing.T) {
 	}
 }
 
+func TestJetStreamParallelConsumerCreation(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3SClient", 3)
+	defer c.shutdown()
+
+	numParallel := 10
+
+	wg := sync.WaitGroup{}
+	wg.Add(numParallel)
+	for i := 0; i < numParallel; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+
+			s := c.randomServer()
+
+			// Individual connection
+			nc, js := jsClientConnect(t, s)
+			defer nc.Close()
+
+			_, err := js.AddStream(&nats.StreamConfig{
+				Name:     "test-stream",
+				Subjects: []string{"common.*.*"},
+				Storage:  nats.FileStorage,
+				Replicas: 3,
+			})
+			if err != nil {
+				t.Errorf("Can not add stream, unexpected error: goroutine %d, %v", i, err)
+				return
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	s := c.randomServer()
+
+	// Client based API
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.PullSubscribe("common.test.1", "common_subscribe", nats.BindStream("test-stream"))
+	if err != nil {
+		t.Errorf("Can not add subscriber: unexpected error: %v", err)
+	}
+
+	numPublish := 100
+
+	for i := 0; i < numPublish; i++ {
+		_, err := js.Publish("common.test.1", []byte(fmt.Sprintf("some data %d", i)))
+		if err != nil {
+			t.Fatalf("Can not publish message, unexpected error: %v", err)
+		}
+	}
+
+	con, err := js.PullSubscribe("common.test.1", "common_subscribe", nats.BindStream("test-stream"))
+	if err != nil {
+		t.Fatalf("Can not create subscriber, unexpected error: %v", err)
+	}
+
+	msgs, err := con.Fetch(numPublish)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	if len(msgs) != numPublish {
+		t.Fatalf("Unexpected number of messages %d, expected %d", len(msgs), numPublish)
+	}
+}
+
 func TestJetStreamClusterMetaSnapshotsAndCatchup(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
